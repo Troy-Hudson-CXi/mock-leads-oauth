@@ -114,4 +114,9 @@ app.patch('/leads/:id', authRequired, async (req, res) => {
 });
 
 const port = process.env.PORT || 3000;
+app.use((req, res) => {
+  res.status(404).json({ error: 'not_found', method: req.method, path: req.path });
+});
+
 app.listen(port, () => console.log(`Auth proxy listening on :${port}`));
+
