@@ -1,10 +1,10 @@
-// Mock OAuth + Leads API (Express)
+// Express auth proxy for MockAPI (keeps your data in MockAPI, adds mock OAuth)
 const express = require('express');
 const cors = require('cors');
 const compression = require('compression');
 const morgan = require('morgan');
 const crypto = require('crypto');
-const db = require('./db.json'); // <-- we’ll add this file next
+const axios = require('axios');
 
 const app = express();
 app.use(cors());
@@ -13,8 +13,26 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(morgan('tiny'));
 
-// --- mock token store ---
-const TOKENS = new Map(); // token -> { exp, scope[] }
+// ---- CONFIG ----
+// Set this to your MockAPI base URL, e.g. https://<project-id>.mockapi.io/api/v1
+const MOCKAPI_BASE = process.env.MOCKAPI_BASE;
+
+// Optional: if you configured any header-based auth on MockAPI, set it here:
+const MOCKAPI_API_KEY = process.env.MOCKAPI_API_KEY; // optional
+
+if (!MOCKAPI_BASE) {
+  console.error('ERROR: Missing MOCKAPI_BASE env var (e.g. https://<proj>.mockapi.io/api/v1)');
+  process.exit(1);
+}
+
+const mock = axios.create({
+  baseURL: MOCKAPI_BASE,
+  timeout: 10000,
+  headers: MOCKAPI_API_KEY ? { 'X-API-Key': MOCKAPI_API_KEY } : {}
+});
+
+// ---- Mock OAuth ----
+const TOKENS = new Map(); // token -> {exp, scope[]}
 const TTL = 3600; // seconds
 
 function issueToken(scope = ['api']) {
@@ -38,67 +56,62 @@ function authRequired(req, res, next) {
   next();
 }
 
-// ---- OAuth token endpoint (mock) ----
 app.post('/oauth/token', (req, res) => {
   const { grant_type, scope = 'api' } = { ...req.body, ...req.query };
   if (!grant_type) return res.status(400).json({ error: 'invalid_request', error_description: 'grant_type required' });
-  switch (grant_type) {
-    case 'client_credentials':
-    case 'authorization_code':
-    case 'password':
-    case 'refresh_token':
-      return res.json(issueToken(scope.split(/\s+/)));
-    default:
-      return res.status(400).json({ error: 'unsupported_grant_type' });
+  const scopes = scope.split(/\s+/);
+  // We "approve" common grants for teaching; all return a token
+  if (['client_credentials','authorization_code','password','refresh_token'].includes(grant_type)) {
+    return res.json(issueToken(scopes));
   }
+  return res.status(400).json({ error: 'unsupported_grant_type' });
 });
 
-// ---- helpers ----
-function paginate(arr, page = 1, limit = 50) {
-  const p = Math.max(1, parseInt(page, 10));
-  const l = Math.max(1, Math.min(1000, parseInt(limit, 10)));
-  return arr.slice((p - 1) * l, (p - 1) * l + l);
-}
-function sortBy(arr, field, order = 'asc') {
-  if (!field) return arr;
-  const dir = order.toLowerCase() === 'desc' ? -1 : 1;
-  return [...arr].sort((a, b) => (a[field] > b[field] ? 1 : a[field] < b[field] ? -1 : 0) * dir);
-}
-
-// ---- public info ----
+// ---- Public info & health ----
 app.get('/', (_req, res) => {
   res.json({
-    service: 'Mock Leads API',
-    version: '1.0.0',
+    service: 'Mock Leads API (Auth Proxy)',
+    backend: MOCKAPI_BASE,
     oauth: { token_endpoint: '/oauth/token', grant_types: ['client_credentials','authorization_code','password','refresh_token'] },
-    routes: ['GET /campaigns', 'GET /leads', 'PATCH /leads/:id'],
-    note: 'Data loads from db.json; restarts reset edits if your host rebuilds.'
+    routes: ['GET /campaigns', 'GET /leads', 'PATCH /leads/:id']
   });
 });
 app.get('/health', (_req, res) => res.send('ok'));
 
-// ---- protected routes ----
-app.get('/campaigns', authRequired, (req, res) => res.json(db.campaigns));
-
-app.get('/leads', authRequired, (req, res) => {
-  const { campaignId, status, firstName, lastName, page = 1, limit = 25, sortBy: s, order = 'asc' } = req.query;
-  let leads = db.leads;
-  if (campaignId) leads = leads.filter(l => l.campaignId === campaignId);
-  if (status) leads = leads.filter(l => l.status === status);
-  if (firstName) leads = leads.filter(l => String(l.firstName).toLowerCase() === String(firstName).toLowerCase());
-  if (lastName) leads = leads.filter(l => String(l.lastName).toLowerCase() === String(lastName).toLowerCase());
-  leads = sortBy(leads, s, order);
-  res.set('X-Total-Count', String(leads.length));
-  res.set('Access-Control-Expose-Headers', 'X-Total-Count');
-  res.json(paginate(leads, page, limit));
+// ---- Protected routes that proxy to MockAPI ----
+app.get('/campaigns', authRequired, async (req, res) => {
+  try {
+    const r = await mock.get('/campaigns', { params: req.query });
+    res.json(r.data);
+  } catch (e) {
+    res.status(e.response?.status || 500).json(e.response?.data || { error: 'proxy_error' });
+  }
 });
 
-app.patch('/leads/:id', authRequired, (req, res) => {
-  const i = db.leads.findIndex(l => String(l.id) === String(req.params.id));
-  if (i < 0) return res.status(404).json({ error: 'not_found' });
-  db.leads[i] = { ...db.leads[i], ...req.body };
-  res.json(db.leads[i]);
+app.get('/leads', authRequired, async (req, res) => {
+  try {
+    // MockAPI uses page & limit, plus your filters (campaignId, status, etc.)
+    const r = await mock.get('/leads', { params: req.query });
+    // If MockAPI returns a total header, forward it; otherwise just send data
+    const total = r.headers['x-total-count'];
+    if (total) {
+      res.set('X-Total-Count', total);
+      res.set('Access-Control-Expose-Headers', 'X-Total-Count');
+    }
+    res.json(r.data);
+  } catch (e) {
+    res.status(e.response?.status || 500).json(e.response?.data || { error: 'proxy_error' });
+  }
+});
+
+app.patch('/leads/:id', authRequired, async (req, res) => {
+  try {
+    const r = await mock.patch(`/leads/${encodeURIComponent(req.params.id)}`, req.body);
+    res.json(r.data);
+  } catch (e) {
+    res.status(e.response?.status || 500).json(e.response?.data || { error: 'proxy_error' });
+  }
 });
 
 const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`Mock API listening on :${port}`));
+app.listen(port, () => console.log(`Auth proxy listening on :${port}`));
