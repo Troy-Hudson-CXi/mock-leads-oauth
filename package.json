@@ -1,0 +1,14 @@
+{
+  "name": "mock-leads-oauth",
+  "version": "1.0.0",
+  "description": "Mock OAuth + Leads API for training",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "compression": "^1.7.4",
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "morgan": "^1.10.0"
+  }
+}
