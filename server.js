@@ -91,7 +91,7 @@ app.get('/campaigns', authRequired, async (req, res) => {
 app.get('/leads', authRequired, async (req, res) => {
   try {
     // MockAPI uses page & limit, plus your filters (campaignId, status, etc.)
-    const r = await mock.get('/leads', { params: req.query });
+    const r = await mock.get('/Leads', { params: req.query });
     // If MockAPI returns a total header, forward it; otherwise just send data
     const total = r.headers['x-total-count'];
     if (total) {
@@ -104,7 +104,7 @@ app.get('/leads', authRequired, async (req, res) => {
   }
 });
 
-app.patch('/leads/:id', authRequired, async (req, res) => {
+app.patch('/Leads/:id', authRequired, async (req, res) => {
   try {
     const r = await mock.patch(`/leads/${encodeURIComponent(req.params.id)}`, req.body);
     res.json(r.data);
